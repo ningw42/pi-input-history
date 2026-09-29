@@ -34,8 +34,14 @@ describe("canonical skill invocations", () => {
   });
 
   test("preserves Unicode, quoting, and internal spacing verbatim", () => {
-    const args = `check "naïve" café — 日本語 🚀\n\n  indented   line\t'single' \`tick\`\n\n\nend`;
+    const args = `check "naïve" café — 日本語 🚀\n\n  indented   line 'single' \`tick\`\n\n\nend`;
     expect(toRecallText(envelope({ args }), loaded())).toBe(`/skill:code-review ${args}`);
+  });
+
+  test("shows tabs and carriage returns the way Pi's editor stores assigned text", () => {
+    // pi-tui Editor.normalizeText: CRLF and CR become LF, a tab becomes four spaces.
+    const args = "  lead\ta\tb\r\nc\rd\r\n\r\ne";
+    expect(toRecallText(envelope({ args }), loaded())).toBe("/skill:code-review   lead    a    b\nc\nd\n\ne");
   });
 
   test("does not trim leading whitespace of the arguments", () => {
@@ -86,6 +92,7 @@ describe("text that stays raw", () => {
 
   test("ordinary prompts and existing shorthand pass through", () => {
     raw("fix the failing test");
+    raw("tabs\tand\r\nreturns\rstay as stored");
     raw("/skill:code-review review changes since main");
     raw("");
   });

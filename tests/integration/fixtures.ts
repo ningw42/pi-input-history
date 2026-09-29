@@ -221,6 +221,8 @@ export function buildFixtures(root: string, options: { bigCorpus?: boolean } = {
     alphaV1: env("alpha", "Alpha body v1 zqxj-marker.", "collapse me"),
     alphaV2: env("alpha", "Alpha body v2 zqxj-marker.", "collapse me"),
     codeReview: env("code-review", "Review body.", '审查 changes "quoted"\n  indented line'),
+    whitespace: env("alpha", "Whitespace body.", "  lead\twhitespace a\tb\r\nc\rd"),
+    plainTabs: "plain\ttab prompt\r\nsecond",
   };
   const JAN = Date.parse("2026-01-01T00:00:00Z");
   const workSessions = sessionDirFor(agentDir, work);
@@ -229,6 +231,8 @@ export function buildFixtures(root: string, options: { bigCorpus?: boolean } = {
   recentA.exchange("cache between variants");
   recentA.exchange(cacheRecords.alphaV2);
   recentA.exchange(cacheRecords.codeReview);
+  recentA.exchange(cacheRecords.plainTabs);
+  recentA.exchange(cacheRecords.whitespace);
   recentA.write(join(workSessions, "2026-01-31_reca.jsonl"));
   const recentB = new SessionFile("recb", work, JAN + 20 * 86_400_000);
   for (let i = 1; i <= 110; i++) recentB.exchange(`cache prompt ${String(i).padStart(3, "0")}`);

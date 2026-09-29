@@ -444,6 +444,21 @@ async function startupChecks(t: TestContext) {
   equal("startup.onChangeAdds.history", editor.history, ["added during recall", ...before].slice(0, 100));
   t.ctx.ui.setEditorText("");
 
+  // Tabs and carriage returns in a converted invocation's arguments show as Pi's editor holds text,
+  // identically in reverse search (list, preview, accepted text) and in Up/Down.
+  const whitespace = "/skill:alpha   lead    whitespace a    b\nc\nd";
+  await t.searchAndAccept("whitespace.search", "whitespace", whitespace);
+  t.ctx.ui.setEditorText("");
+  for (const [id, record, shown] of [
+    ["whitespace.up", fixtures.cacheRecords.whitespace, whitespace],
+    ["whitespace.ordinaryPromptUpUnchanged", fixtures.cacheRecords.plainTabs, fixtures.cacheRecords.plainTabs],
+  ] as const) {
+    const steps = t.editor().history.indexOf(record) + 1;
+    for (let i = 0; i < steps; i++) await t.press("\x1b[A");
+    equal(id, t.editor().getText(), shown);
+    t.ctx.ui.setEditorText("");
+  }
+
   // S6/S5/S4: reverse search.
   await t.searchAndAccept("search.ctxAlpha", "ctx alpha", "/skill:alpha ctx alpha args\nsecond line");
   await t.searchAndAccept("search.collapse", "collapse me", "/skill:alpha collapse me", { occurrences: 1 });
@@ -493,6 +508,7 @@ async function editorContract(t: TestContext) {
     "multi\nline\nplain",
     fixtures.ctxRecords.ghost,
     fixtures.cacheRecords.codeReview,
+    fixtures.cacheRecords.whitespace,
     "/skill:alpha live typed",
     fixtures.ctxRecords.beta,
     fixtures.ctxRecords.delta,

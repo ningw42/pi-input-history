@@ -59,7 +59,7 @@ Keep the review focused on authentication.
 
 This applies to reverse search (filtering, preview, and the accepted text) and to ↑/↓ history navigation. Recall only fills the editor; it never submits.
 
-- **Stored arguments are kept**, including line breaks, spacing, quotes, and Unicode; only the whole entry's outer whitespace is trimmed, as for every history entry. An invocation without arguments recalls as `/skill:name`.
+- **Stored arguments are kept**, including line breaks, spacing, quotes, and Unicode; only the whole entry's outer whitespace is trimmed, as for every history entry. Tabs and carriage returns are shown the way Pi's editor holds any text it is given: a tab becomes four spaces, and CRLF or CR becomes a line break. An invocation without arguments recalls as `/skill:name`.
 - **Reconstructed, not your keystrokes.** The command is rebuilt from what Pi stored, which is not always exactly what you typed: Pi trims the arguments when it expands a skill, and other extensions may have changed the message.
 - **Resubmitting runs the current skill.** Pi reads the skill's file again when you submit, so the instructions may differ from the ones originally used.
 - **Conservative fallback.** A record is shown as-is (expanded) unless its envelope is unambiguous and the skill with that name is currently loaded from exactly the recorded file. This excludes, for example, unknown or renamed skills, a skill now loaded from a different path, or an extension command that intercepts `/skill:name`. Names outside `A-Z a-z 0-9 . _ : -` (starting with a letter or digit) also stay raw.

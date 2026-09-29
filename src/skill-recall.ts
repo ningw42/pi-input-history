@@ -94,14 +94,26 @@ export function commandInventory(getCommands: () => readonly CommandInfo[]): Ski
   };
 }
 
-/** Display text for a history record: `/skill:name arguments` for a resolvable invocation, else `text`. */
+/**
+ * Display text for a history record: `/skill:name arguments` for a resolvable invocation, else `text`.
+ *
+ * The arguments are the stored ones, shown as Pi's editor holds any text it is given (pi-tui
+ * `Editor.normalizeText`): CRLF and CR become LF and a tab becomes four spaces. Reverse search accepts
+ * through the editor's public setText, which applies exactly that, so every recall surface shows the
+ * same text. Records that stay raw are returned unchanged.
+ */
 export function toRecallText(text: string, inventory: SkillInventory): string {
   try {
     const invocation = parseSkillInvocation(text);
     if (!invocation || !inventory.resolves(invocation.name, invocation.location)) return text;
     // One space: a newline would become part of the command name when Pi parses `/skill:NAME`.
-    return invocation.args ? `/skill:${invocation.name} ${invocation.args}` : `/skill:${invocation.name}`;
+    return invocation.args ? `/skill:${invocation.name} ${editorText(invocation.args)}` : `/skill:${invocation.name}`;
   } catch {
     return text;
   }
+}
+
+/** pi-tui Editor.normalizeText (Pi 0.87.1). */
+function editorText(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
 }
