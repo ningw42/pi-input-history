@@ -95,7 +95,7 @@ export function commandInventory(getCommands: () => readonly CommandInfo[]): Ski
       if (commands === undefined) {
         countRecallWork("inventoryReads");
         try {
-          commands = Array.from(getCommands());
+          commands = getCommands();
         } catch {
           commands = [];
         }
