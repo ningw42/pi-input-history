@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { UserMessage } from "@earendil-works/pi-ai";
 import {
+  Editor,
   Input,
   Key,
   matchesKey,
@@ -124,7 +125,7 @@ export default function (pi: ExtensionAPI) {
         prevComponentFactory?.(tui, theme, keybindings) ??
         new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 
-      installHistoryRecall(editor, navigationText);
+      installHistoryRecall(editor, navigationText, Editor.prototype);
       if (seededEditors.has(editor)) return editor;
       seededEditors.add(editor);
 

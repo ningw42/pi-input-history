@@ -50,7 +50,7 @@ Defaults: search = `ctrl+r`, newer = `ctrl+s`, scroll up = `ctrl+k`, scroll down
 
 ### Skill invocations
 
-Pi stores an explicitly invoked skill (`/skill:code-review review changes since main`) as the skill's expanded instructions followed by your arguments. Recall shows the command you typed instead of the expanded body:
+Pi stores an explicitly invoked skill (`/skill:code-review review changes since main`) as the skill's expanded instructions followed by your arguments. Recall shows a compact command, reconstructed from that stored invocation, instead of the expanded body:
 
 ```text
 /skill:code-review review changes since main
@@ -59,7 +59,8 @@ Keep the review focused on authentication.
 
 This applies to reverse search (filtering, preview, and the accepted text) and to ↑/↓ history navigation. Recall only fills the editor; it never submits.
 
-- **Arguments are preserved verbatim**, including line breaks, spacing, quotes, and Unicode. An invocation without arguments recalls as `/skill:name`.
+- **Stored arguments are kept**, including line breaks, spacing, quotes, and Unicode; only the whole entry's outer whitespace is trimmed, as for every history entry. An invocation without arguments recalls as `/skill:name`.
+- **Reconstructed, not your keystrokes.** The command is rebuilt from what Pi stored, which is not always exactly what you typed: Pi trims the arguments when it expands a skill, and other extensions may have changed the message.
 - **Resubmitting runs the current skill.** Pi reads the skill's file again when you submit, so the instructions may differ from the ones originally used.
 - **Conservative fallback.** A record is shown as-is (expanded) unless its envelope is unambiguous and the skill with that name is currently loaded from exactly the recorded file. This excludes, for example, unknown or renamed skills, a skill now loaded from a different path, or an extension command that intercepts `/skill:name`. Names outside `A-Z a-z 0-9 . _ : -` (starting with a letter or digit) also stay raw.
 - **Text only.** Recognition cannot tell a generated envelope from identical text you pasted yourself, so such a paste is recalled as a command too.
@@ -67,7 +68,7 @@ This applies to reverse search (filtering, preview, and the accepted text) and t
 
 ### Editor replacement and supported Pi versions
 
-↑/↓ recall is tested against Pi **0.87.1** and its stock editor, including other extensions' editor factories that build on it. It relies on Pi editor internals that have no public hook. With an editor it cannot adapt safely, the extension leaves that editor unchanged: ↑/↓ shows skill invocations expanded, while reverse search still shows the command.
+↑/↓ recall is tested against Pi **0.87.1** and its stock editor, including other extensions' editor factories that return it or a subclass. It relies on Pi editor internals that have no public hook, so it adapts an editor only when that editor's history methods are Pi's own, unmodified. Any other editor is left unchanged: ↑/↓ shows skill invocations expanded, while reverse search still shows the command.
 
 When Pi replaces the editor for `/new`, `/resume`, `/fork`, or `/reload`, the extension loads the cross-session history and then the current session's prompts into the new editor, so ↑/↓ keeps the current session's history.
 
@@ -131,7 +132,7 @@ npm run test:pi     # real Pi in a pseudo-terminal; needs Python 3 and git
 npm test            # both
 ```
 
-The Pi integration run uses a temporary HOME and agent directory with synthetic skills and sessions, starts Pi with `--offline`, and never sends a prompt to a model. It checks Pi's version, compares session-file effects and startup time with version 1.1.3 (read from git history), and fails rather than skipping when a prerequisite is missing. Run it again whenever the supported Pi version changes.
+The Pi integration run uses a temporary HOME and agent directory with synthetic skills and sessions and starts Pi with `--offline`. No prompt reaches a real model: the one scenario that resubmits recalled commands uses Pi's local faux model. It checks Pi's version, compares session-file effects, startup time, and reverse-search keystroke cost with version 1.1.3 (read from git history), and fails rather than skipping when a prerequisite is missing. Run it again whenever the supported Pi version changes.
 
 ## Acknowledgments
 

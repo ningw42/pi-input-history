@@ -5,14 +5,13 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { skillEnvelope as envelope } from "../support/skill-envelope.ts";
 
-export const SKILL_NAMES = ["alpha", "beta", "code-review", "shadowed", "delta", "epsilon"] as const;
+export const SKILL_NAMES = ["alpha", "beta", "code-review", "implement", "gamma", "shadowed", "delta", "epsilon"] as const;
+/** Skills loaded explicitly on the command line; delta and epsilon come from the probe's resources_discover. */
+export const CLI_SKILLS = ["alpha", "beta", "code-review", "implement", "gamma", "shadowed"] as const;
 export type SkillName = (typeof SKILL_NAMES)[number];
 
-export function envelope(name: string, location: string, body: string, args?: string): string {
-  const block = `<skill name="${name}" location="${location}">\nReferences are relative to ${dirname(location)}.\n\n${body}\n</skill>`;
-  return args ? `${block}\n\n${args}` : block;
-}
 
 type Content = string | ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[];
 
@@ -103,18 +102,28 @@ export function sessionDirFor(agentDir: string, cwd: string): string {
 
 export type Fixtures = ReturnType<typeof buildFixtures>;
 
-export function buildFixtures(root: string) {
+export function buildFixtures(root: string, options: { bigCorpus?: boolean } = {}) {
   const agentDir = join(root, "agent");
   const home = join(root, "home");
   const work = join(root, "work");
   const empty = join(root, "empty");
   const writes = join(root, "writes");
   const outside = join(root, "outside");
-  for (const dir of [agentDir, home, work, empty, writes, outside]) mkdirSync(dir, { recursive: true });
+  const replay = join(root, "replay");
+  const big = join(root, "big");
+  for (const dir of [agentDir, home, work, empty, writes, outside, replay, big]) mkdirSync(dir, { recursive: true });
 
   writeFileSync(
     join(agentDir, "settings.json"),
-    JSON.stringify({ quietStartup: true, enableSkillCommands: false, lastChangelogVersion: "0.87.1" }),
+    JSON.stringify({
+      quietStartup: true,
+      enableSkillCommands: false,
+      lastChangelogVersion: "0.87.1",
+      // Only the replay scenario's local faux model can fail; a short backoff keeps its retry observable.
+      retry: { enabled: true, maxRetries: 2, baseDelayMs: 1500 },
+      // Lets the replay scenario compact its small session.
+      compaction: { keepRecentTokens: 10 },
+    }),
   );
   writeFileSync(join(agentDir, "auth.json"), "{}");
   writeFileSync(
@@ -239,6 +248,50 @@ export function buildFixtures(root: string) {
   }
   const largeSession = large.write(join(outside, "large.jsonl"));
 
+  // ── Search timing: the current branch ends with a ~300 KB envelope ──
+  const hugeRecord = env("alpha", `${"Huge body line.\n".repeat(20_000)}End.`, "huge args");
+  const search = new SessionFile("srch", work, JAN);
+  for (let i = 0; i < 40; i++) search.exchange(`search plain prompt ${i}`);
+  search.exchange(hugeRecord);
+  const searchSession = search.write(join(outside, "search.jsonl"));
+
+  // ── Replay: historical invocations in the cache of cwd `replay`, recalled and resubmitted ──
+  const replayRecords = {
+    codeReview: env("code-review", "Historical review body.", "review the diff\nfocus on auth"),
+    implement: env("implement", "Historical implement body.", "build the feature\nwith tests"),
+    beta: env("beta", "Historical beta body.", "beta args"),
+    gamma: env("gamma", "Historical gamma body.", "gamma args"),
+    delta: env("delta", "Historical delta body.", "delta args"),
+  };
+  const replayCache = new SessionFile("rpl", replay, JAN + 10 * 86_400_000);
+  for (const record of Object.values(replayRecords)) {
+    replayCache.exchange(record);
+    replayCache.exchange("replay plain prompt");
+  }
+  replayCache.write(join(sessionDirFor(agentDir, replay), "2026-01-11_rpl.jsonl"));
+
+  // ── Startup timing on a large multi-session cwd: 150 sessions, then a resumed 300-prompt session ──
+  const bigContextH: string[] = [];
+  let bigContextPath: string | undefined;
+  if (options.bigCorpus) {
+    const bigSessions = sessionDirFor(agentDir, big);
+    for (let n = 0; n < 150; n++) {
+      const session = new SessionFile(`b${n}`, big, JAN + (n + 10) * 3_600_000);
+      for (let i = 0; i < 20; i++) {
+        const text = i % 7 === 0 ? env("alpha", `Corpus body ${n}-${i}.`, `corpus ${n}-${i}`) : `corpus prompt ${n}-${i}`;
+        session.exchange(i % 11 === 0 ? [{ type: "text", text }, { type: "text", text: " (two blocks)" }] : text);
+      }
+      session.write(join(bigSessions, `b${String(n).padStart(3, "0")}.jsonl`));
+    }
+    const context = new SessionFile("bctx", big, JAN);
+    for (let i = 0; i < 300; i++) {
+      const text = i % 10 === 0 ? env("code-review", `Big context body ${i}.`, `big context ${i}`) : `big context prompt ${i}`;
+      context.exchange(text);
+      bigContextH.push(text);
+    }
+    bigContextPath = context.write(join(bigSessions, "bctx.jsonl"));
+  }
+
   // ── Sessions that Pi's loader repairs or migrates when opened ──
   const writesSessions = sessionDirFor(agentDir, writes);
   const canonical = new SessionFile("can", writes, JAN + 3 * 86_400_000);
@@ -258,13 +311,16 @@ export function buildFixtures(root: string) {
     root,
     agentDir,
     home,
-    cwd: { work, empty, writes },
+    cwd: { work, empty, writes, replay, big },
     skills,
     ctxRecords,
     ctxExpected,
     resumeRecords,
     cacheRecords,
-    sessions: { workContext, workResume, outsideContext, outsideResume, largeSession, writesFiles },
+    sessions: { workContext, workResume, outsideContext, outsideResume, largeSession, searchSession, writesFiles },
+    replayRecords,
+    hugeRecord,
+    bigContext: bigContextPath ? { path: bigContextPath, h: bigContextH } : undefined,
     drafts: [
       "/skill:alpha edited shorthand\nline two",
       env("epsilon", "Epsilon body.", "epsilon args, edited by hand"),

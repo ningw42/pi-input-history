@@ -1,15 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { commandInventory, toRecallText, type SkillInventory } from "../../src/skill-recall.ts";
+import { skillEnvelope } from "../support/skill-envelope.ts";
 
 const LOCATION = "/abs/skills/code-review/SKILL.md";
 
 function envelope(options: { name?: string; location?: string; body?: string; args?: string } = {}): string {
-  const name = options.name ?? "code-review";
-  const location = options.location ?? LOCATION;
-  const baseDir = location.slice(0, location.lastIndexOf("/"));
   const body = options.body ?? "Review the diff.\n\n## Steps\n1. Read it.";
-  const block = `<skill name="${name}" location="${location}">\nReferences are relative to ${baseDir}.\n\n${body}\n</skill>`;
-  return options.args === undefined ? block : `${block}\n\n${options.args}`;
+  return skillEnvelope(options.name ?? "code-review", options.location ?? LOCATION, body, options.args);
 }
 
 function skill(name: string, path: string) {
@@ -135,6 +132,7 @@ describe("text that stays raw", () => {
     raw(text.replace("\n</skill>\n\n", "\n</skill>\n"));
     raw(text.replace("\n</skill>\n\n", "\n</skill> "));
     raw(text.replace("\n</skill>\n\ngo", "\n</skill>\n\n"));
+    raw(envelope({ args: "" }));
     raw(text.replace("\n</skill>", "</skill>"));
   });
 

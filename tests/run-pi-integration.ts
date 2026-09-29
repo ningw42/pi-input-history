@@ -35,10 +35,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { buildFixtures, type Fixtures } from "./integration/fixtures.ts";
+import { buildFixtures, CLI_SKILLS, type Fixtures } from "./integration/fixtures.ts";
+import { evaluateRun, timingSample, type ProbeRecord } from "./integration/run-evaluation.ts";
 
 const REPO = resolve(import.meta.dir, "..");
 const PROBE = join(REPO, "tests", "integration", "probe.ts");
+const TIMING_PROBE = join(REPO, "tests", "integration", "timing-probe.ts");
 const PTY_HOST = join(REPO, "tests", "integration", "pty-host.py");
 const EXTENSION = join(REPO, "index.ts");
 const PI_VERSION = "0.87.1";
@@ -119,16 +121,34 @@ console.log(`scratch ${scratch}\n`);
 
 // ─── Running one scenario ──────────────────────────────────────────────────────────────────────────
 
-type Result = { id?: string; pass?: boolean; detail?: unknown; metric?: unknown; done?: boolean };
-type SessionKey = "workContext" | "outsideContext" | "largeSession" | "none";
-type Scenario = { name: string; cwd: keyof Fixtures["cwd"]; session: SessionKey; extension?: string };
+type SessionKey = "workContext" | "outsideContext" | "largeSession" | "searchSession" | "bigContext" | "none" | "new";
+type Scenario = {
+  name: string;
+  cwd: keyof Fixtures["cwd"];
+  session: SessionKey;
+  extension?: string;
+  /** The timing probe, which imports nothing from this repository before measuring. */
+  timing?: TimingPlan;
+  args?: string[];
+};
+type TimingPlan = {
+  kind: "startup" | "search";
+  arm: "baseline" | "feature";
+  h: string[];
+  cacheSize: number;
+  discoverDelayMs?: number;
+  query?: string;
+  hugeRecord?: string;
+};
 
 let runCounter = 0;
 
-function sessionPath(fx: Fixtures, key: SessionKey): string | undefined {
-  if (key === "none") return undefined;
-  const session = fx.sessions[key];
-  return typeof session === "string" ? session : session.path;
+function sessionArgs(fx: Fixtures, key: SessionKey): string[] {
+  if (key === "new") return [];
+  if (key === "none") return ["--no-session"];
+  const session = key === "bigContext" ? fx.bigContext : fx.sessions[key];
+  if (!session) die(`fixture session ${key} was not built`);
+  return ["--session", typeof session === "string" ? session : session.path];
 }
 
 function listFiles(dir: string): string[] {
@@ -150,9 +170,8 @@ function runPi(scenario: Scenario, fx: Fixtures) {
   const control = join(dir, "control");
   const plan = join(dir, "plan.json");
   writeFileSync(results, "");
-  writeFileSync(plan, JSON.stringify({ scenario: scenario.name, results, control, fixtures: fx }));
+  writeFileSync(plan, JSON.stringify({ scenario: scenario.name, results, control, fixtures: fx, timing: scenario.timing }));
 
-  const session = sessionPath(fx, scenario.session);
   const argv = [
     piBin,
     "--offline",
@@ -161,12 +180,13 @@ function runPi(scenario: Scenario, fx: Fixtures) {
     "--no-prompt-templates",
     "--no-themes",
     "--no-context-files",
-    ...(["alpha", "beta", "code-review", "shadowed"] as const).flatMap((name) => ["--skill", fx.skills[name]]),
+    ...CLI_SKILLS.flatMap((name) => ["--skill", fx.skills[name]]),
     "-e",
-    PROBE,
+    scenario.timing ? TIMING_PROBE : PROBE,
     "-e",
     scenario.extension ?? EXTENSION,
-    ...(session ? ["--session", session] : ["--no-session"]),
+    ...sessionArgs(fx, scenario.session),
+    ...(scenario.args ?? []),
   ];
   const config = join(dir, "pty.json");
   writeFileSync(
@@ -184,20 +204,18 @@ function runPi(scenario: Scenario, fx: Fixtures) {
   );
   const host = spawnSync("python3", [PTY_HOST, config], { encoding: "utf8", env: hostEnv });
   const status = JSON.parse(host.stdout.trim().split("\n").pop() || "{}") as { exitCode?: number; timedOut?: boolean };
-  const records: Result[] = readFileSync(results, "utf8")
+  const records: ProbeRecord[] = readFileSync(results, "utf8")
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-  const problems: string[] = [];
-  if (host.status !== 0) problems.push(`pty host failed: ${host.stderr}`);
-  if (status.timedOut) problems.push("Pi timed out");
-  else if (status.exitCode !== 0) problems.push(`Pi exited with ${status.exitCode}`);
-  if (!records.some((r) => r.done)) problems.push("probe did not finish");
-  if (problems.length > 0) {
-    const transcript = readFileSync(join(dir, "transcript"), "latin1").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    problems.push(`transcript tail:\n${transcript.slice(-1500)}`);
-  }
-  return { records, problems };
+  const evaluation = evaluateRun(records, {
+    hostExitCode: host.status,
+    hostError: host.stderr,
+    piExitCode: status.exitCode,
+    timedOut: status.timedOut,
+  });
+  const transcript = () => readFileSync(join(dir, "transcript"), "latin1").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  return { records, evaluation, transcript };
 }
 
 // ─── Reporting ─────────────────────────────────────────────────────────────────────────────────────
@@ -205,26 +223,27 @@ function runPi(scenario: Scenario, fx: Fixtures) {
 const failures: string[] = [];
 const metrics: Record<string, unknown> = {};
 
-function report(label: string, records: Result[], problems: string[]) {
-  const checks = records.filter((r) => r.id && r.pass !== undefined);
-  const failed = checks.filter((r) => !r.pass);
+/** Every run is judged the same way; a failed run keeps its transcript tail for diagnosis. */
+function report(label: string, run: ReturnType<typeof runPi>, summary?: string): boolean {
+  const { records, evaluation } = run;
   for (const r of records) if (r.metric !== undefined) metrics[`${label} ${r.id}`] = r.metric;
-  for (const r of failed) failures.push(`${label}: ${r.id}\n    ${JSON.stringify(r.detail)}`);
-  for (const problem of problems) failures.push(`${label}: ${problem}`);
-  if (checks.length === 0) failures.push(`${label}: no assertions were reported`);
-  const ok = failed.length === 0 && problems.length === 0 && checks.length > 0;
-  console.log(`${ok ? "ok  " : "FAIL"} ${label.padEnd(34)} ${checks.length - failed.length}/${checks.length} checks`);
+  for (const failure of evaluation.failures) failures.push(`${label}: ${failure}`);
+  const ok = evaluation.failures.length === 0;
+  if (!ok && !records.some((r) => r.done)) failures.push(`${label}: transcript tail:\n${run.transcript().slice(-1500)}`);
+  const passed = evaluation.checks - evaluation.failedChecks;
+  console.log(`${ok ? "ok  " : "FAIL"} ${label.padEnd(40)} ${summary ?? `${passed}/${evaluation.checks} checks`}`);
+  return ok;
 }
 
-function freshFixtures(name: string): Fixtures {
+function freshFixtures(name: string, options?: { bigCorpus?: boolean }): Fixtures {
   const root = join(scratch, name);
   mkdirSync(root, { recursive: true });
-  return buildFixtures(root);
+  return buildFixtures(root, options);
 }
 
-/** Fixture session files must never change; new files (fork) are allowed. */
-function assertUnchanged(label: string, before: Map<string, string>, after: Map<string, string>, exempt: string[] = []) {
-  const changed = [...before].filter(([path, hash]) => !exempt.includes(path) && after.get(path) !== hash).map(([path]) => path);
+/** Fixture session files must never change; new files (fork, a new session) are allowed. */
+function assertUnchanged(label: string, before: Map<string, string>, after: Map<string, string>) {
+  const changed = [...before].filter(([path, hash]) => after.get(path) !== hash).map(([path]) => path);
   if (changed.length > 0) failures.push(`${label}: fixture session files changed: ${changed.join(", ")}`);
   const created = [...after.keys()].filter((path) => !before.has(path));
   if (created.length > 0) metrics[`${label} created session files`] = created.map((p) => relative(scratch, p));
@@ -240,82 +259,123 @@ const behavior: Scenario[] = [
   { name: "cooperating-factory", cwd: "work", session: "workContext" },
   { name: "unsupported-editor", cwd: "work", session: "workContext" },
   { name: "reused-editor", cwd: "empty", session: "outsideContext" },
+  { name: "incompatible-editor", cwd: "work", session: "workContext" },
+  { name: "minimal-editor", cwd: "work", session: "workContext" },
   { name: "editor-contract", cwd: "work", session: "workContext" },
+  { name: "replay", cwd: "replay", session: "new", args: ["--provider", "faux", "--model", "faux-1"] },
   { name: "transform-timing", cwd: "work", session: "largeSession" },
 ];
 
 const only = process.env.PIH_ONLY?.split(",").filter(Boolean);
+const selected = (name: string) => !only || only.includes(name);
+
 for (const scenario of behavior) {
-  if (only && !only.includes(scenario.name)) continue;
+  if (!selected(scenario.name)) continue;
   const fx = freshFixtures(scenario.name);
   const before = snapshot(fx);
-  const { records, problems } = runPi(scenario, fx);
-  report(scenario.name, records, problems);
+  report(scenario.name, runPi(scenario, fx));
   assertUnchanged(scenario.name, before, snapshot(fx));
 }
 
 // ─── Session-file writes: feature versus the unchanged 1.1.3 loader (S12) ──────────────────────────
 
-if (!only || only.includes("session-writes")) {
+const ARMS = [
+  ["baseline", baselineExtension],
+  ["feature", EXTENSION],
+] as const;
+
+if (selected("session-writes")) {
   const outcomes: Record<string, Record<string, string>> = {};
-  for (const [variant, extension] of [
-    ["baseline-1.1.3", baselineExtension],
-    ["feature", EXTENSION],
-  ] as const) {
-    const fx = freshFixtures(`writes-${variant}`);
+  for (const [arm, extension] of ARMS) {
+    const fx = freshFixtures(`writes-${arm}`);
     const sources = Object.fromEntries(Object.entries(fx.sessions.writesFiles).map(([k, path]) => [k, readFileSync(path, "utf8")]));
-    const { records, problems } = runPi({ name: "session-writes", cwd: "writes", session: "none", extension }, fx);
-    report(`session-writes (${variant})`, records, problems);
+    report(`session-writes (${arm})`, runPi({ name: "session-writes", cwd: "writes", session: "none", extension }, fx));
     const normalize = (text: string) => text.replaceAll(fx.root, "<root>");
-    outcomes[variant] = Object.fromEntries(
+    outcomes[arm] = Object.fromEntries(
       Object.entries(fx.sessions.writesFiles).map(([k, path]) => [k, normalize(readFileSync(path, "utf8"))]),
     );
-    if (outcomes[variant]!.canonical !== normalize(sources.canonical!)) failures.push(`session-writes (${variant}): canonical fixture changed`);
-    metrics[`session-writes (${variant}) loader rewrote`] = Object.keys(sources).filter(
-      (k) => normalize(sources[k]!) !== outcomes[variant]![k],
-    );
+    if (outcomes[arm]!.canonical !== normalize(sources.canonical!)) failures.push(`session-writes (${arm}): canonical fixture changed`);
+    metrics[`session-writes (${arm}) loader rewrote`] = Object.keys(sources).filter((k) => normalize(sources[k]!) !== outcomes[arm]![k]);
   }
   for (const key of ["canonical", "repair", "migrate"]) {
-    if (outcomes["feature"]?.[key] !== outcomes["baseline-1.1.3"]?.[key]) {
-      failures.push(`session-writes: ${key} differs from the 1.1.3 loader's result`);
+    if (outcomes.feature?.[key] !== outcomes.baseline?.[key]) failures.push(`session-writes: ${key} differs from the 1.1.3 loader's result`);
+  }
+}
+
+// ─── Startup time: feature versus 1.1.3, alternating runs, small and large corpus ─────────────────
+
+const stats = (values: number[]) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mean = sorted.reduce((sum, v) => sum + v, 0) / sorted.length;
+  const sd = Math.sqrt(sorted.reduce((sum, v) => sum + (v - mean) ** 2, 0) / Math.max(1, sorted.length - 1));
+  const round = (v: number | undefined) => (v === undefined ? undefined : Math.round(v * 10) / 10);
+  return { n: sorted.length, median: round(sorted[sorted.length >> 1]), min: round(sorted[0]), max: round(sorted[sorted.length - 1]), sd: round(sd) };
+};
+
+type Workload = { label: string; cwd: keyof Fixtures["cwd"]; session: SessionKey; bigCorpus?: boolean; h: (fx: Fixtures) => string[] };
+const workloads: Workload[] = [
+  { label: "small", cwd: "work", session: "workContext", h: (fx) => fx.ctxExpected.hChronological },
+  { label: "large", cwd: "big", session: "bigContext", bigCorpus: true, h: (fx) => fx.bigContext!.h },
+];
+
+/** One timed startup; the sample counts only if the run passed (seed checked, no recall before input). */
+function timeStartup(label: string, workload: Workload, arm: "baseline" | "feature", discoverDelayMs = 0): number | undefined {
+  const fx = freshFixtures(label, { bigCorpus: workload.bigCorpus });
+  const extension = arm === "baseline" ? baselineExtension : EXTENSION;
+  const timing: TimingPlan = { kind: "startup", arm, h: workload.h(fx), cacheSize: 100, discoverDelayMs };
+  const run = runPi({ name: "startup-timing", cwd: workload.cwd, session: workload.session, extension, timing }, fx);
+  const { sample, failures: rejected } = timingSample(run.records, run.evaluation, "timing.startup");
+  report(label, run, sample === undefined ? undefined : `${sample.toFixed(1)} ms`);
+  failures.push(...rejected.map((f) => `${label}: ${f}`));
+  return sample;
+}
+
+if (selected("startup-timing")) {
+  for (const workload of workloads) {
+    const samples: Record<string, number[]> = { baseline: [], feature: [] };
+    for (let i = 0; i < STARTUP_RUNS; i++) {
+      for (const [arm] of ARMS) {
+        const sample = timeStartup(`startup-timing ${workload.label} ${arm} #${i + 1}`, workload, arm);
+        if (sample !== undefined) samples[arm]!.push(sample);
+      }
+    }
+    const base = stats(samples.baseline!);
+    const feat = stats(samples.feature!);
+    metrics[`startup ms, ${workload.label} corpus (baseline 1.1.3)`] = base;
+    metrics[`startup ms, ${workload.label} corpus (feature)`] = feat;
+    const delta = (feat.median ?? Number.NaN) - (base.median ?? Number.NaN);
+    // "No meaningful regression": within 5% of the baseline median (at least 25 ms for timer noise).
+    const allowed = Math.max(25, 0.05 * (base.median ?? 0));
+    const ok = base.n === STARTUP_RUNS && feat.n === STARTUP_RUNS && delta < allowed;
+    if (!ok) failures.push(`startup-timing ${workload.label}: median delta ${delta.toFixed(1)} ms exceeds ${allowed.toFixed(1)} ms`);
+    console.log(`${ok ? "ok  " : "FAIL"} ${`startup-timing ${workload.label} corpus`.padEnd(40)} median delta ${delta.toFixed(1)} ms`);
+
+    if (workload.label === "small") {
+      // The endpoint must include resource discovery and Pi's native preload, even with a capped history.
+      const delayed = timeStartup("startup-timing small feature, discovery +600 ms", workload, "feature", 600);
+      const moved = delayed !== undefined && feat.median !== undefined && delayed - feat.median >= 500;
+      if (!moved) failures.push(`startup-timing: a 600 ms discovery delay moved the endpoint only to ${delayed} ms (median ${feat.median})`);
+      console.log(`${moved ? "ok  " : "FAIL"} ${"startup endpoint follows discovery".padEnd(40)} +${((delayed ?? 0) - (feat.median ?? 0)).toFixed(1)} ms`);
     }
   }
 }
 
-// ─── Startup time: feature versus 1.1.3, alternating runs ──────────────────────────────────────────
+// ─── Reverse-search keystroke cost: raw (1.1.3) versus compact, with a ~300 KB envelope ────────────
 
-if (!only || only.includes("startup-timing")) {
-  const samples: Record<string, number[]> = { "baseline-1.1.3": [], feature: [] };
-  for (let i = 0; i < STARTUP_RUNS; i++) {
-    for (const [variant, extension] of [
-      ["baseline-1.1.3", baselineExtension],
-      ["feature", EXTENSION],
-    ] as const) {
-      const fx = freshFixtures(`timing-${variant}-${i}`);
-      const { records, problems } = runPi({ name: "startup-timing", cwd: "work", session: "workContext", extension }, fx);
-      const timing = records.find((r) => r.id === "timing.startup")?.metric as { ready?: number } | undefined;
-      if (problems.length > 0 || typeof timing?.ready !== "number") {
-        report(`startup-timing (${variant} #${i + 1})`, records, problems);
-        continue;
-      }
-      samples[variant]!.push(timing.ready);
-    }
+if (selected("search-timing")) {
+  const p95: Record<string, number> = {};
+  for (const [arm, extension] of ARMS) {
+    const fx = freshFixtures(`search-timing-${arm}`);
+    const h = [...Array.from({ length: 40 }, (_, i) => `search plain prompt ${i}`), fx.hugeRecord];
+    const timing: TimingPlan = { kind: "search", arm, h, cacheSize: 100, query: "huge args", hugeRecord: fx.hugeRecord };
+    const run = runPi({ name: "search-timing", cwd: "work", session: "searchSession", extension, timing }, fx);
+    const metric = run.records.find((r) => r.id === "timing.search")?.metric as { p95?: number } | undefined;
+    if (report(`search-timing ${arm}`, run) && typeof metric?.p95 === "number") p95[arm] = metric.p95;
+    else failures.push(`search-timing ${arm}: no valid keystroke timing`);
   }
-  const stats = (values: number[]) => {
-    const sorted = [...values].sort((a, b) => a - b);
-    return { n: sorted.length, median: sorted[sorted.length >> 1], min: sorted[0], max: sorted[sorted.length - 1] };
-  };
-  const base = stats(samples["baseline-1.1.3"]!);
-  const feat = stats(samples.feature!);
-  metrics["startup ready ms (baseline-1.1.3)"] = base;
-  metrics["startup ready ms (feature)"] = feat;
-  const delta = (feat.median ?? Number.NaN) - (base.median ?? Number.NaN);
-  metrics["startup median delta ms"] = Math.round(delta * 10) / 10;
-  // "No meaningful regression": within 5% of the baseline median (at least 25 ms for timer noise).
-  const allowed = Math.max(25, 0.05 * (base.median ?? 0));
-  const ok = base.n === STARTUP_RUNS && feat.n === STARTUP_RUNS && delta < allowed;
-  if (!ok) failures.push(`startup-timing: median delta ${delta.toFixed(1)} ms exceeds ${allowed.toFixed(1)} ms`);
-  console.log(`${ok ? "ok  " : "FAIL"} ${"startup-timing".padEnd(34)} median delta ${delta.toFixed(1)} ms`);
+  const ok = p95.feature !== undefined && p95.baseline !== undefined && p95.feature <= p95.baseline;
+  if (!ok) failures.push(`search-timing: compact p95 ${p95.feature} ms is worse than raw p95 ${p95.baseline} ms`);
+  console.log(`${ok ? "ok  " : "FAIL"} ${"search keystroke p95 compact <= raw".padEnd(40)} ${p95.feature?.toFixed(2)} vs ${p95.baseline?.toFixed(2)} ms`);
 }
 
 // ─── Summary ───────────────────────────────────────────────────────────────────────────────────────

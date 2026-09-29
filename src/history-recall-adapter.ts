@@ -13,6 +13,11 @@
  * or overwrite entries. Everything else — routing, cursor placement, draft/undo state, callbacks — stays
  * with the original method, which is called exactly once per call.
  *
+ * The shape of these members is not proof of those semantics, so the adapter installs only when the
+ * editor's history-related methods are the stock implementations themselves (supplied by the caller as
+ * `stock`, normally pi-tui's `Editor.prototype`). Subclasses that change other behavior qualify; an
+ * editor that overrides any of these methods is left unchanged.
+ *
  * These are private, version-sensitive internals. Re-run the Pi integration tests when upgrading Pi.
  */
 
@@ -21,6 +26,8 @@ export type InstallResult = "installed" | "already-installed" | "unsupported";
 const ADAPTER = Symbol.for("pi-input-history.history-recall-adapter");
 /** The stock editor's private method that history navigation calls to show an entry. */
 const RECALL_METHOD = "setTextInternal";
+/** Every method whose stock behavior the call-site analysis above depends on. */
+const STOCK_HISTORY_METHODS = [RECALL_METHOD, "navigateHistory", "exitHistoryBrowsing", "setText", "addToHistory"];
 
 type HistoryState = { history?: unknown; historyIndex?: unknown };
 /** Kept on the wrapper, so a later installation on the same editor replaces the display function. */
@@ -32,7 +39,7 @@ type AdapterState = { display: (raw: string) => string };
  * already adapted (one reused across Pi lifecycles), `display` replaces the previous function instead
  * of stacking a second wrapper.
  */
-export function installHistoryRecall(editor: object, display: (raw: string) => string): InstallResult {
+export function installHistoryRecall(editor: object, display: (raw: string) => string, stock: object): InstallResult {
   let original: unknown;
   let previous: PropertyDescriptor | undefined;
   try {
@@ -43,6 +50,7 @@ export function installHistoryRecall(editor: object, display: (raw: string) => s
       installed.display = display;
       return "already-installed";
     }
+    if (!usesStockHistoryMethods(editor, stock)) return "unsupported";
     const { history, historyIndex } = editor as HistoryState;
     if (!isHistory(history) || !isIndexInto(historyIndex, history)) return "unsupported";
     if (!Object.isExtensible(editor)) return "unsupported";
@@ -83,6 +91,13 @@ function shownText(receiver: unknown, text: unknown, display: (raw: string) => s
   } catch {
     return text;
   }
+}
+
+function usesStockHistoryMethods(editor: object, stock: object): boolean {
+  return STOCK_HISTORY_METHODS.every((name) => {
+    const method = (stock as Record<string, unknown>)[name];
+    return typeof method === "function" && (editor as Record<string, unknown>)[name] === method;
+  });
 }
 
 function isHistory(history: unknown): history is unknown[] {
