@@ -3,6 +3,8 @@
  *
  * - Loads recent prompts from previous sessions into up/down history on startup.
  * - Configurable reverse search overlay (fuzzy subsequence matching).
+ * - Recalls skill invocations as `/skill:name arguments` instead of their expanded body
+ *   (see src/skill-recall.ts); history itself stays raw.
  *
  * Config: ~/.pi/agent/pi-input-history.json
  *   { "searchShortcut": "ctrl+r", "newerShortcut": "ctrl+s" }
@@ -20,6 +22,7 @@ import {
   CustomEditor,
   SessionManager,
   getAgentDir,
+  sessionEntryToContextMessages,
   type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import type { UserMessage } from "@earendil-works/pi-ai";
@@ -34,8 +37,19 @@ import {
   type KeyId,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { activeContextHistory } from "./src/context-history.ts";
+import { installHistoryRecall } from "./src/history-recall-adapter.ts";
+import { commandInventory, toRecallText } from "./src/skill-recall.ts";
 
 const MAX_MESSAGES = 100;
+/** Session starts after which Pi's editor lacks the session's own prompts (see session_start). */
+const REPLAY_CONTEXT_REASONS = new Set(["new", "resume", "fork", "reload"]);
+/**
+ * Editors already given their history. Process-wide, because an editor factory may hand the same
+ * instance to a later lifecycle, after this extension has been reloaded.
+ */
+const seededEditors: WeakSet<object> = ((globalThis as any)[Symbol.for("pi-input-history.seeded-editors")] ??=
+  new WeakSet<object>());
 const DEFAULT_SEARCH_SHORTCUT: KeyId = "ctrl+r";
 const DEFAULT_NEWER_SHORTCUT: KeyId = "ctrl+s";
 const DEFAULT_SCROLL_UP_SHORTCUT: KeyId = "ctrl+k";
@@ -90,11 +104,19 @@ export default function (pi: ExtensionAPI) {
   const config = loadConfig();
   let historyCache: string[] = [];
 
-  pi.on("session_start", async (_event, ctx) => {
+  /** A snapshot of the loaded commands, read at most once and only if a skill envelope needs it. */
+  const loadedCommands = () => commandInventory(() => pi.getCommands());
+  /** Up/Down: each recalled entry resolves against the commands loaded at that moment. */
+  const navigationText = (raw: string) => toRecallText(raw, loadedCommands());
+
+  pi.on("session_start", async (event, ctx) => {
     const items = await loadRecentPrompts(ctx.cwd, MAX_MESSAGES);
     historyCache = items;
 
-    if (items.length === 0) return;
+    // Pi copies text and handlers into a replacement editor, but not history. On startup Pi preloads
+    // the session's prompts into the editor after this handler returns. For in-process new/resume/fork
+    // and /reload it has already preloaded (or never preloads) the default editor, so replay them here.
+    const replayContext = REPLAY_CONTEXT_REASONS.has(event.reason);
 
     const prevComponentFactory = ctx.ui.getEditorComponent();
     ctx.ui.setEditorComponent((tui, theme, keybindings) => {
@@ -102,8 +124,15 @@ export default function (pi: ExtensionAPI) {
         prevComponentFactory?.(tui, theme, keybindings) ??
         new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 
+      installHistoryRecall(editor, navigationText);
+      if (seededEditors.has(editor)) return editor;
+      seededEditors.add(editor);
+
       for (let i = items.length - 1; i >= 0; i--) {
         editor.addToHistory?.(items[i]!);
+      }
+      if (replayContext) {
+        for (const text of contextHistory(ctx)) editor.addToHistory?.(text);
       }
       return editor;
     });
@@ -112,8 +141,12 @@ export default function (pi: ExtensionAPI) {
   pi.registerShortcut(config.searchShortcut, {
     description: "Reverse search through prompt history",
     handler: async (ctx) => {
-      const branchHistory = collectBranchHistory(ctx);
-      const merged = mergeHistory(branchHistory, historyCache);
+      // One inventory snapshot per search; branch-before-cache precedence and first-occurrence
+      // dedup apply to the display text, so different expanded bodies of one command collapse.
+      const inventory = loadedCommands();
+      const display = (raw: string) => toRecallText(raw, inventory);
+      const branchHistory = collectBranchHistory(ctx).map(display);
+      const merged = mergeHistory(branchHistory, historyCache.map(display));
 
       if (merged.length === 0) {
         ctx.ui.notify("No prompt history yet.", "info");
@@ -536,6 +569,18 @@ function collectBranchHistory(ctx: any): string[] {
   return history.reverse(); // newest first
 }
 
+/**
+ * The current session's prompts as Pi's own editor preload adds them: compaction-aware, text blocks
+ * joined. Deliberately not collectBranchHistory, whose first-text-block extraction serves search.
+ */
+function contextHistory(ctx: any): string[] {
+  try {
+    return activeContextHistory(ctx.sessionManager, sessionEntryToContextMessages);
+  } catch {
+    return [];
+  }
+}
+
 /** Merge branch history (current session) with cached cross-session history, deduplicated. */
 function mergeHistory(branchHistory: string[], cached: string[]): string[] {
   const seen = new Set<string>();
@@ -555,7 +600,8 @@ function mergeHistory(branchHistory: string[], cached: string[]): string[] {
   return merged;
 }
 
-async function loadRecentPrompts(
+/** Exported for the Pi integration probe (tests/integration/probe.ts). */
+export async function loadRecentPrompts(
   cwd: string,
   maxMessages: number,
 ): Promise<string[]> {

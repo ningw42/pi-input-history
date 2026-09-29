@@ -22,6 +22,16 @@
   "bugs": {
     "url": "https://github.com/ouzhenkun/pi-input-history/issues"
   },
+  "files": [
+    "index.ts",
+    "src",
+    "assets"
+  ],
+  "scripts": {
+    "test": "npm run test:unit && npm run test:pi",
+    "test:unit": "BUN_BE_BUN=1 \"${PI_BIN:-${PI_PACKAGE_DIR:?set PI_BIN or PI_PACKAGE_DIR}/pi}\" test ./tests/unit",
+    "test:pi": "BUN_BE_BUN=1 \"${PI_BIN:-${PI_PACKAGE_DIR:?set PI_BIN or PI_PACKAGE_DIR}/pi}\" run ./tests/run-pi-integration.ts"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
