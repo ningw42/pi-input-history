@@ -53,28 +53,40 @@ class SessionFile {
   assistant(text: string): string {
     return this.entry({
       type: "message",
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text }],
-        api: "openai-completions",
-        provider: "fixture",
-        model: "fixture-model",
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          totalTokens: 2,
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-        },
-        stopReason: "stop",
-        timestamp: this.clock + 1000,
-      },
+      message: { ...assistantFields(), content: [{ type: "text", text }], stopReason: "stop", timestamp: this.clock + 1000 },
     });
   }
 
   exchange(content: Content, label?: string): string {
     const id = this.user(content, label);
+    this.assistant("ok");
+    return id;
+  }
+
+  /** A prompt answered through one tool call whose result is `output`: where a real session's bytes are. */
+  toolExchange(content: Content, output: string): string {
+    const id = this.user(content);
+    const callId = `call-${this.seq}`;
+    this.entry({
+      type: "message",
+      message: {
+        ...assistantFields(),
+        content: [{ type: "toolCall", id: callId, name: "bash", arguments: { command: "cat data.txt" } }],
+        stopReason: "toolUse",
+        timestamp: this.clock + 1000,
+      },
+    });
+    this.entry({
+      type: "message",
+      message: {
+        role: "toolResult",
+        toolCallId: callId,
+        toolName: "bash",
+        content: [{ type: "text", text: output }],
+        isError: false,
+        timestamp: this.clock + 1000,
+      },
+    });
     this.assistant("ok");
     return id;
   }
@@ -94,6 +106,29 @@ class SessionFile {
     return path;
   }
 }
+
+function assistantFields() {
+  return {
+    role: "assistant",
+    api: "openai-completions",
+    provider: "fixture",
+    model: "fixture-model",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  };
+}
+
+/**
+ * The large startup corpus: synthetic sessions at roughly the volume of the research's `copilotd`
+ * corpus (714 files, 664 MB), where session scanning dominates startup. Most bytes are tool output.
+ */
+export const LARGE_CORPUS = { sessions: 700, promptsPerSession: 10, toolOutputBytes: 85_000 };
 
 /** Pi's session directory for a cwd (session-manager.ts getDefaultSessionDirPath). */
 export function sessionDirFor(agentDir: string, cwd: string): string {
@@ -274,16 +309,20 @@ export function buildFixtures(root: string, options: { bigCorpus?: boolean } = {
   }
   replayCache.write(join(sessionDirFor(agentDir, replay), "2026-01-11_rpl.jsonl"));
 
-  // ── Startup timing on a large multi-session cwd: 150 sessions, then a resumed 300-prompt session ──
+  // ── Startup timing on a large cwd (LARGE_CORPUS), then a resumed 300-prompt skill session ──
   const bigContextH: string[] = [];
   let bigContextPath: string | undefined;
   if (options.bigCorpus) {
     const bigSessions = sessionDirFor(agentDir, big);
-    for (let n = 0; n < 150; n++) {
+    let output = "";
+    for (let line = 0; output.length < LARGE_CORPUS.toolOutputBytes; line++) {
+      output += `synthetic tool output line ${String(line).padStart(5, "0")}: build step completed without findings\n`;
+    }
+    for (let n = 0; n < LARGE_CORPUS.sessions; n++) {
       const session = new SessionFile(`b${n}`, big, JAN + (n + 10) * 3_600_000);
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < LARGE_CORPUS.promptsPerSession; i++) {
         const text = i % 7 === 0 ? env("alpha", `Corpus body ${n}-${i}.`, `corpus ${n}-${i}`) : `corpus prompt ${n}-${i}`;
-        session.exchange(i % 11 === 0 ? [{ type: "text", text }, { type: "text", text: " (two blocks)" }] : text);
+        session.toolExchange(i % 11 === 0 ? [{ type: "text", text }, { type: "text", text: " (two blocks)" }] : text, output);
       }
       session.write(join(bigSessions, `b${String(n).padStart(3, "0")}.jsonl`));
     }

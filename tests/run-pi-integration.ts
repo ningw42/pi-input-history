@@ -35,8 +35,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { buildFixtures, CLI_SKILLS, type Fixtures } from "./integration/fixtures.ts";
-import { evaluateRun, timingSample, type ProbeRecord } from "./integration/run-evaluation.ts";
+import { buildFixtures, CLI_SKILLS, sessionDirFor, type Fixtures } from "./integration/fixtures.ts";
+import { evaluateRun, searchSample, timingSample, type ProbeRecord } from "./integration/run-evaluation.ts";
 
 const REPO = resolve(import.meta.dir, "..");
 const PROBE = join(REPO, "tests", "integration", "probe.ts");
@@ -134,6 +134,7 @@ type Scenario = {
 type TimingPlan = {
   kind: "startup" | "search";
   arm: "baseline" | "feature";
+  sessionPath: string;
   h: string[];
   cacheSize: number;
   discoverDelayMs?: number;
@@ -312,17 +313,46 @@ const stats = (values: number[]) => {
   return { n: sorted.length, median: round(sorted[sorted.length >> 1]), min: round(sorted[0]), max: round(sorted[sorted.length - 1]), sd: round(sd) };
 };
 
-type Workload = { label: string; cwd: keyof Fixtures["cwd"]; session: SessionKey; bigCorpus?: boolean; h: (fx: Fixtures) => string[] };
+type Workload = {
+  label: string;
+  cwd: keyof Fixtures["cwd"];
+  session: SessionKey;
+  h: (fx: Fixtures) => string[];
+  /** Fixtures for one trial: fresh per trial, or one read-only corpus shared by every trial. */
+  fixtures: (label: string) => Fixtures;
+};
+
+let largeCorpus: Fixtures | undefined;
 const workloads: Workload[] = [
-  { label: "small", cwd: "work", session: "workContext", h: (fx) => fx.ctxExpected.hChronological },
-  { label: "large", cwd: "big", session: "bigContext", bigCorpus: true, h: (fx) => fx.bigContext!.h },
+  {
+    label: "small",
+    cwd: "work",
+    session: "workContext",
+    h: (fx) => fx.ctxExpected.hChronological,
+    fixtures: (label) => freshFixtures(label),
+  },
+  {
+    label: "large",
+    cwd: "big",
+    session: "bigContext",
+    h: (fx) => fx.bigContext!.h,
+    fixtures: () => (largeCorpus ??= freshFixtures("startup-timing-large-corpus", { bigCorpus: true })),
+  },
 ];
 
-/** One timed startup; the sample counts only if the run passed (seed checked, no recall before input). */
+/** Size and mtime of every session file: a cheap way to show timing trials never write the corpus. */
+function statSnapshot(fx: Fixtures): string {
+  return listFiles(join(fx.agentDir, "sessions"))
+    .map((path) => `${path}:${statSync(path).size}:${statSync(path).mtimeMs}`)
+    .join("\n");
+}
+
+/** One timed startup; the sample counts only if the run passed (workload checked, no recall work). */
 function timeStartup(label: string, workload: Workload, arm: "baseline" | "feature", discoverDelayMs = 0): number | undefined {
-  const fx = freshFixtures(label, { bigCorpus: workload.bigCorpus });
+  const fx = workload.fixtures(label);
   const extension = arm === "baseline" ? baselineExtension : EXTENSION;
-  const timing: TimingPlan = { kind: "startup", arm, h: workload.h(fx), cacheSize: 100, discoverDelayMs };
+  const sessionPath = sessionArgs(fx, workload.session)[1]!;
+  const timing: TimingPlan = { kind: "startup", arm, sessionPath, h: workload.h(fx), cacheSize: 100, discoverDelayMs };
   const run = runPi({ name: "startup-timing", cwd: workload.cwd, session: workload.session, extension, timing }, fx);
   const { sample, failures: rejected } = timingSample(run.records, run.evaluation, "timing.startup");
   report(label, run, sample === undefined ? undefined : `${sample.toFixed(1)} ms`);
@@ -332,6 +362,13 @@ function timeStartup(label: string, workload: Workload, arm: "baseline" | "featu
 
 if (selected("startup-timing")) {
   for (const workload of workloads) {
+    const corpus = workload.label === "large" ? workload.fixtures("") : undefined;
+    const corpusBefore = corpus && statSnapshot(corpus);
+    if (corpus) {
+      const files = listFiles(sessionDirFor(corpus.agentDir, corpus.cwd.big));
+      const bytes = files.reduce((sum, path) => sum + statSync(path).size, 0);
+      metrics["startup large corpus"] = { files: files.length, megabytes: Math.round(bytes / 1e6) };
+    }
     const samples: Record<string, number[]> = { baseline: [], feature: [] };
     for (let i = 0; i < STARTUP_RUNS; i++) {
       for (const [arm] of ARMS) {
@@ -339,6 +376,7 @@ if (selected("startup-timing")) {
         if (sample !== undefined) samples[arm]!.push(sample);
       }
     }
+    if (corpus && statSnapshot(corpus) !== corpusBefore) failures.push("startup-timing large: a trial wrote to the corpus");
     const base = stats(samples.baseline!);
     const feat = stats(samples.feature!);
     metrics[`startup ms, ${workload.label} corpus (baseline 1.1.3)`] = base;
@@ -367,11 +405,13 @@ if (selected("search-timing")) {
   for (const [arm, extension] of ARMS) {
     const fx = freshFixtures(`search-timing-${arm}`);
     const h = [...Array.from({ length: 40 }, (_, i) => `search plain prompt ${i}`), fx.hugeRecord];
-    const timing: TimingPlan = { kind: "search", arm, h, cacheSize: 100, query: "huge args", hugeRecord: fx.hugeRecord };
+    const sessionPath = fx.sessions.searchSession;
+    const timing: TimingPlan = { kind: "search", arm, sessionPath, h, cacheSize: 100, query: "huge args", hugeRecord: fx.hugeRecord };
     const run = runPi({ name: "search-timing", cwd: "work", session: "searchSession", extension, timing }, fx);
-    const metric = run.records.find((r) => r.id === "timing.search")?.metric as { p95?: number } | undefined;
-    if (report(`search-timing ${arm}`, run) && typeof metric?.p95 === "number") p95[arm] = metric.p95;
-    else failures.push(`search-timing ${arm}: no valid keystroke timing`);
+    report(`search-timing ${arm}`, run);
+    const sample = searchSample(run.records, run.evaluation, "timing.search");
+    failures.push(...sample.failures.map((f) => `search-timing ${arm}: ${f}`));
+    if (sample.p95 !== undefined) p95[arm] = sample.p95;
   }
   const ok = p95.feature !== undefined && p95.baseline !== undefined && p95.feature <= p95.baseline;
   if (!ok) failures.push(`search-timing: compact p95 ${p95.feature} ms is worse than raw p95 ${p95.baseline} ms`);

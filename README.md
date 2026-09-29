@@ -132,7 +132,7 @@ npm run test:pi     # real Pi in a pseudo-terminal; needs Python 3 and git
 npm test            # both
 ```
 
-The Pi integration run uses a temporary HOME and agent directory with synthetic skills and sessions and starts Pi with `--offline`. No prompt reaches a real model: the one scenario that resubmits recalled commands uses Pi's local faux model. It checks Pi's version, compares session-file effects, startup time, and reverse-search keystroke cost with version 1.1.3 (read from git history), and fails rather than skipping when a prerequisite is missing. Run it again whenever the supported Pi version changes.
+The Pi integration run uses a temporary HOME and agent directory with synthetic skills and sessions and starts Pi with `--offline`. No prompt reaches a real model: the one scenario that resubmits recalled commands uses Pi's local faux model. It checks Pi's version, compares session-file effects, startup time, and reverse-search keystroke cost with version 1.1.3 (read from git history), and fails rather than skipping when a prerequisite is missing. The large startup comparison writes a temporary synthetic session corpus of about 600 MB, and a full run takes a few minutes. Run it again whenever the supported Pi version changes.
 
 ## Acknowledgments
 

@@ -293,3 +293,27 @@ describe("large and malformed records", () => {
     }
   });
 });
+
+describe("recall work counters for test harnesses", () => {
+  const COUNTERS = Symbol.for("pi-input-history.recall-counters");
+  const global = globalThis as { [COUNTERS]?: { normalizations: number; inventoryReads: number } };
+
+  test("count normalizations and inventory reads while a harness has installed counters", () => {
+    global[COUNTERS] = { normalizations: 0, inventoryReads: 0 };
+    try {
+      const inventory = loaded();
+      toRecallText("plain", inventory);
+      toRecallText(envelope({ args: "go" }), inventory);
+      toRecallText(envelope({ args: "again" }), inventory);
+      toRecallText("/skill:code-review x", commandInventory(() => []));
+      expect(global[COUNTERS]).toEqual({ normalizations: 4, inventoryReads: 1 });
+    } finally {
+      delete global[COUNTERS];
+    }
+  });
+
+  test("count nothing and install nothing otherwise", () => {
+    expect(toRecallText(envelope({ args: "go" }), loaded())).toBe("/skill:code-review go");
+    expect(COUNTERS in globalThis).toBe(false);
+  });
+});

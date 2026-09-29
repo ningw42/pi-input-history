@@ -64,6 +64,18 @@ function hasCloserLine(text: string): boolean {
   return text === line || text.startsWith(`${line}\n`) || text.endsWith(`\n${line}`) || text.includes(`\n${line}\n`);
 }
 
+/**
+ * Opt-in instrumentation for test harnesses: while an object is installed under this global symbol,
+ * every recall (`toRecallText` call) and every inventory read (`getCommands()` call) is counted in it.
+ * The Pi integration timing probe uses it to show startup does no recall work.
+ */
+const RECALL_COUNTERS = Symbol.for("pi-input-history.recall-counters");
+
+function countRecallWork(kind: "normalizations" | "inventoryReads") {
+  const counters = (globalThis as { [RECALL_COUNTERS]?: Record<string, number> })[RECALL_COUNTERS];
+  if (counters) counters[kind] = (counters[kind] ?? 0) + 1;
+}
+
 /** The slice of a `pi.getCommands()` entry that identifies a loaded command. */
 export type CommandInfo = { name?: unknown; source?: unknown; sourceInfo?: { path?: unknown } };
 
@@ -81,6 +93,7 @@ export function commandInventory(getCommands: () => readonly CommandInfo[]): Ski
   return {
     resolves(name, location) {
       if (commands === undefined) {
+        countRecallWork("inventoryReads");
         try {
           commands = Array.from(getCommands());
         } catch {
@@ -103,6 +116,7 @@ export function commandInventory(getCommands: () => readonly CommandInfo[]): Ski
  * same text. Records that stay raw are returned unchanged.
  */
 export function toRecallText(text: string, inventory: SkillInventory): string {
+  countRecallWork("normalizations");
   try {
     const invocation = parseSkillInvocation(text);
     if (!invocation || !inventory.resolves(invocation.name, invocation.location)) return text;
