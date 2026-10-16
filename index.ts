@@ -90,17 +90,12 @@ function loadConfig(): Config {
 export default function (pi: ExtensionAPI) {
   const config = loadConfig();
   let historyCache: string[] = [];
-  let sessionGeneration = 0;
 
   pi.on("session_start", async (_event, ctx) => {
-    const generation = ++sessionGeneration;
-    historyCache = [];
-    let items: string[] = [];
     let currentEditor: EditorComponent | undefined;
     const seedHistory = (editor: EditorComponent) => {
-      if (generation !== sessionGeneration) return;
-      for (let i = items.length - 1; i >= 0; i--) {
-        editor.addToHistory?.(items[i]!);
+      for (let i = historyCache.length - 1; i >= 0; i--) {
+        editor.addToHistory?.(historyCache[i]!);
       }
     };
 
@@ -116,16 +111,8 @@ export default function (pi: ExtensionAPI) {
       return editor;
     });
 
-    const loaded = await loadRecentPrompts(ctx.cwd, MAX_MESSAGES);
-    if (generation !== sessionGeneration) return;
-    items = loaded;
-    historyCache = items;
+    historyCache = await loadRecentPrompts(ctx.cwd, MAX_MESSAGES);
     if (currentEditor) seedHistory(currentEditor);
-  });
-
-  pi.on("session_shutdown", () => {
-    sessionGeneration++;
-    historyCache = [];
   });
 
   pi.registerShortcut(config.searchShortcut, {

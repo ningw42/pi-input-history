@@ -14,8 +14,12 @@ class Editor {
   addToHistory(text) { this.history.unshift(text); }
 }
 
+const DEFAULT_MESSAGES = ["old prompt", "recent prompt"];
+const EXPECTED_HISTORY = DEFAULT_MESSAGES.toReversed();
+
 let listSessions;
 const sessionEntries = new Map();
+// Node 22.23.3 ignores mock.module's exports option; namedExports supports Node 22.
 mock.module("@earendil-works/pi-coding-agent", {
   namedExports: {
     CustomEditor: Editor,
@@ -38,10 +42,8 @@ mock.module("@earendil-works/pi-tui", {
 const { default: inputHistory } = await import("../index.ts");
 
 function fixture(previousFactory) {
-  let resolve;
-  let reject;
-  const listing = new Promise((yes, no) => { resolve = yes; reject = no; });
-  listSessions = () => listing;
+  const { promise, resolve, reject } = Promise.withResolvers();
+  listSessions = () => promise;
   const handlers = new Map();
   inputHistory({
     on: (event, handler) => handlers.set(event, handler),
@@ -73,8 +75,11 @@ function fixture(previousFactory) {
   return {
     state,
     start: () => handlers.get("session_start")({}, ctx),
-    shutdown: () => handlers.get("session_shutdown")?.({}, ctx),
-    finish: (messages = ["old prompt", "recent prompt"]) => {
+    openSelector: (selector = {}) => {
+      state.view = state.focused = selector;
+      return selector;
+    },
+    finish: (messages = DEFAULT_MESSAGES) => {
       const path = "/fake/session.jsonl";
       sessionEntries.set(path, messages.map((text) => ({
         type: "message", message: { role: "user", content: text },
@@ -88,8 +93,7 @@ function fixture(previousFactory) {
 test("history completion does not dismiss a model selector opened during startup", async () => {
   const f = fixture();
   const loading = f.start();
-  const selector = { query: "gpt", selectedIndex: 2 };
-  f.state.view = f.state.focused = selector;
+  const selector = f.openSelector({ query: "gpt", selectedIndex: 2 });
   f.finish();
   await loading;
   assert.equal(f.state.view, selector);
@@ -111,7 +115,7 @@ test("install once before loading, then seed the same editor without resetting i
   assert.equal(f.state.editor, editor);
   assert.equal(editor.text, "partly typed draft");
   assert.equal(editor.cursor, 6);
-  assert.deepEqual(editor.history, ["recent prompt", "old prompt"]);
+  assert.deepEqual(editor.history, EXPECTED_HISTORY);
 });
 
 test("preserve another extension's editor factory and seed later instances", async () => {
@@ -125,12 +129,12 @@ test("preserve another extension's editor factory and seed later instances", asy
   await loading;
   assert.equal(f.state.editor.marker, "custom editor");
   assert.equal(create.mock.callCount(), 1);
-  assert.deepEqual(customEditor.history, ["recent prompt", "old prompt"]);
+  assert.deepEqual(customEditor.history, EXPECTED_HISTORY);
 
   // A later factory invocation must seed its new editor from the loaded cache.
   create.mock.mockImplementation(() => new Editor());
   const nextEditor = f.state.factory({}, {}, {});
-  assert.deepEqual(nextEditor.history, ["recent prompt", "old prompt"]);
+  assert.deepEqual(nextEditor.history, EXPECTED_HISTORY);
 });
 
 for (const outcome of ["empty", "failed"]) {
@@ -138,8 +142,7 @@ for (const outcome of ["empty", "failed"]) {
     const f = fixture();
     const loading = f.start();
     const editor = f.state.editor;
-    const selector = {};
-    f.state.view = f.state.focused = selector;
+    const selector = f.openSelector();
     if (outcome === "failed") f.fail();
     else f.finish([]);
     await loading;
@@ -150,35 +153,6 @@ for (const outcome of ["empty", "failed"]) {
   });
 }
 
-test("a pending load cannot seed the editor after session shutdown", async () => {
-  const f = fixture();
-  const loading = f.start();
-  const editor = f.state.editor;
-  const replacements = f.state.replacements;
-  f.shutdown();
-  f.finish();
-  await loading;
-  assert.deepEqual(editor.history, []);
-  assert.equal(f.state.editor, editor);
-  assert.equal(f.state.replacements, replacements);
-});
-
-test("a newer session invalidates the previous load and factory seed", async () => {
-  const f = fixture();
-  const firstLoad = f.start();
-  const firstEditor = f.state.editor;
-  const secondLoad = f.start();
-  const secondEditor = f.state.editor;
-  f.finish();
-  await Promise.all([firstLoad, secondLoad]);
-  assert.deepEqual(firstEditor.history, []);
-  assert.deepEqual(secondEditor.history, ["recent prompt", "old prompt"]);
-  assert.equal(f.state.replacements, 2);
-  // The second factory composes the first one. Its obsolete seed must not run.
-  const nextEditor = f.state.factory({}, {}, {});
-  assert.deepEqual(nextEditor.history, ["recent prompt", "old prompt"]);
-});
-
 test("only the latest editor instance is seeded when loading finishes", async () => {
   const f = fixture();
   const loading = f.start();
@@ -187,7 +161,7 @@ test("only the latest editor instance is seeded when loading finishes", async ()
   f.finish();
   await loading;
   assert.deepEqual(firstEditor.history, []);
-  assert.deepEqual(nextEditor.history, ["recent prompt", "old prompt"]);
+  assert.deepEqual(nextEditor.history, EXPECTED_HISTORY);
 });
 
 test("an editor without addToHistory remains supported", async () => {
